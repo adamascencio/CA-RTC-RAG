@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Download and extract the California Revenue and Taxation Code.
 
 Adapted from johnakelly-yahoo-com/california-codes/update_ca_codes.py.
@@ -15,9 +14,12 @@ import tempfile
 from datetime import datetime
 from html import unescape
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = SCRIPT_DIR / "data" / "CA Code - Revenue and Taxation Code.txt"
+DEFAULT_DATA_DIR = SCRIPT_DIR / "data"
+DEFAULT_XML_OUTPUT = SCRIPT_DIR / "data" / "CA Code - Revenue and Taxation Code.xml"
 RTC_CODE = "RTC"
 
 
@@ -82,8 +84,19 @@ def read_lob_file(data_dir: Path, lob_filename: str) -> str:
         return ""
 
 
-def parse_code(data_dir: Path, output_path: Path) -> None:
-    """Parse RTC tables and write one ordered plain-text code file."""
+def read_lob_xml(data_dir: Path, lob_filename: str) -> str:
+    """Read a section's original XML fragment, returning empty when unavailable."""
+    if not lob_filename:
+        return ""
+    try:
+        return (data_dir / lob_filename).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"  Warning: could not read {lob_filename}: {exc}")
+        return ""
+
+
+def parse_code(data_dir: Path, output_path: Path, xml_output_path: Path) -> None:
+    """Parse RTC tables and write ordered plain-text and XML code files."""
     codes = parse_tsv(data_dir / "CODES_TBL.dat", ["code", "title"])
     code_names = {}
     for row in codes:
@@ -192,6 +205,46 @@ def parse_code(data_dir: Path, output_path: Path) -> None:
         return ([99999], 0, number)
 
     sections.sort(key=sort_key)
+
+    xml_root = ET.Element(
+        "code",
+        {
+            "code": RTC_CODE,
+            "title": code_title,
+            "jurisdiction": "State of California",
+        },
+    )
+    xml_root.set("lastUpdated", latest_update)
+    xml_sections = ET.SubElement(xml_root, "sections")
+    for section in sections:
+        raw_xml = read_lob_xml(data_dir, section["lob_file"].strip())
+        if not raw_xml:
+            continue
+        xml_section = ET.SubElement(
+            xml_sections,
+            "section",
+            {"number": section["section_num"].strip()},
+        )
+        if section["history"].strip():
+            ET.SubElement(xml_section, "history").text = section["history"].strip()
+        section_xml = ET.SubElement(xml_section, "contentXml")
+        try:
+            content_element = ET.fromstring(raw_xml)
+        except ET.ParseError as exc:
+            print(
+                f"  Warning: could not parse XML for section "
+                f"{section['section_num'].strip()}: {exc}"
+            )
+            continue
+        section_xml.append(content_element)
+
+    xml_output_path.parent.mkdir(parents=True, exist_ok=True)
+    ET.indent(xml_root, space="  ")
+    ET.ElementTree(xml_root).write(
+        xml_output_path, encoding="utf-8", xml_declaration=True
+    )
+    print(f"Wrote {xml_output_path}")
+
     separator = "\n\n" + "=" * 70 + "\n\n"
     thin_separator = "\n" + "-" * 43 + "\n\n"
     try:
@@ -255,13 +308,25 @@ def parse_code(data_dir: Path, output_path: Path) -> None:
     print(f"Wrote {output_path} ({size_str})")
 
 
-def download_and_parse(output_path: Path, keep_download: bool = False) -> None:
+def download_and_parse(
+    output_path: Path,
+    keep_download: bool = False,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    xml_output_path: Path = DEFAULT_XML_OUTPUT,
+) -> None:
     download_url = get_download_url()
+    download_name = download_url.rsplit("/", 1)[-1]
+    downloads_zip = Path.home() / "Downloads" / download_name
     tmp_dir = Path(tempfile.mkdtemp(prefix="ca_rtc_"))
-    zip_path = tmp_dir / download_url.rsplit("/", 1)[-1]
+    zip_path = downloads_zip if downloads_zip.is_file() else tmp_dir / download_name
     try:
-        print(f"Downloading {download_url} (the ZIP is several hundred MB)...")
-        subprocess.run(["curl", "-fL", "-o", str(zip_path), download_url], check=True)
+        if zip_path == downloads_zip:
+            print(f"Using existing ZIP: {zip_path}")
+        else:
+            print(f"Downloading {download_url} (the ZIP is several hundred MB)...")
+            subprocess.run(
+                ["curl", "-fL", "-o", str(zip_path), download_url], check=True
+            )
         print("Extracting RTC tables...")
         subprocess.run(
             [
@@ -279,17 +344,22 @@ def download_and_parse(output_path: Path, keep_download: bool = False) -> None:
         )
         print("Extracting section content files...")
         subprocess.run(
-            ["unzip", "-o", str(zip_path), "LAW_SECTION_TBL_*.lob"],
+            [
+                "unzip",
+                "-o",
+                str(zip_path),
+                "LAW_SECTION_TBL_*.lob",
+            ],
             cwd=tmp_dir,
             check=True,
             capture_output=True,
         )
         lob_count = sum(1 for path in tmp_dir.glob("LAW_SECTION_TBL_*.lob"))
         print(f"Extracted {lob_count} section content files")
-        parse_code(tmp_dir, output_path)
+        parse_code(tmp_dir, output_path, xml_output_path)
     finally:
         if keep_download:
-            print(f"Keeping downloaded and extracted files in {tmp_dir}")
+            print(f"Keeping extracted files in {tmp_dir}")
         else:
             print("Cleaning up temporary files...")
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -303,7 +373,7 @@ def main() -> None:
     parser.add_argument(
         "--keep-download",
         action="store_true",
-        help="keep the temporary ZIP and extracted files",
+        help="keep the temporary table files for inspection",
     )
     args = parser.parse_args()
     download_and_parse(args.output.expanduser().resolve(), args.keep_download)
