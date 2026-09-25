@@ -4,6 +4,30 @@ This project will be a retrieval-augmented generation (RAG) system for querying 
 
 ## Run
 
+Run the complete persistent indexing and search pipeline:
+
+```sh
+uv run python src/main.py
+uv run python src/main.py --query "What must the Franchise Tax Board report annually?"
+```
+
+Existing XML is reused; missing XML is downloaded. The vector collection is saved
+in `data/chroma` and reused without embedding documents again. Enter `:quit` to
+leave interactive search. Results are source excerpts, not generated AI answers.
+
+Use `--rebuild` to replace the saved index, or `--refresh` to regenerate XML and
+rebuild (the downloader may reuse its cached ZIP). Use `--store-path PATH` for
+another database directory and `--xml PATH` for another XML source. Source hashes,
+model, chunk size, and index version are checked before reuse; mismatches require
+a rebuild. Keep the XML available for this check. Failed rebuilds need to be
+rerun, since rebuilding replaces the old collection.
+
+The `vector_store.create_vector_store()` function returns the client and
+collection for programmatic use. It uses local MiniLM embeddings, a matching
+tokenizer, and a 240-token chunk budget. Model files may download on first use.
+
+To run only the downloader:
+
 ```sh
 uv run python -m ca_revenue_taxation.parser
 ```
